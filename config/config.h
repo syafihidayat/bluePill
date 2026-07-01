@@ -91,9 +91,8 @@
 
 
 #define TOF_MIN_DIST 50
-#define TOF_MAX_DIST 60
+#define TOF_MAX_DIST 74
 #define TOF_JUMP_MAX 100
-#define TOF_CONFIRM_COUNT 3 
 
 // IMU 18,19 / SDA0,SCL0
 // IMU 16,17 / SDA1,SCL1

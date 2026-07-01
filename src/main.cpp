@@ -98,7 +98,7 @@ void readTeensySerial()
 
 void setup()
 {
-  Serial.begin(9600);
+  Serial.begin(115200);
   Serial1.setTx(PB6);
   Serial1.setRx(PB7);
   Serial1.begin(115200);
@@ -138,12 +138,10 @@ void setup()
   }
 
   pinMode(solenoidHolder, OUTPUT);
-  pinMode(solenoidGrip, OUTPUT);
-  pinMode(solenoidExtend, OUTPUT);
+
 
   digitalWrite(solenoidHolder, HIGH);
-  digitalWrite(solenoidGrip, LOW);
-  digitalWrite(solenoidExtend, LOW);
+
 
   MyWire.begin();
   IrReceiver.begin(IR_PIN, ENABLE_LED_FEEDBACK);
@@ -157,7 +155,6 @@ void setup()
   setMotor(cw[1], ccw[1], 0);
   slide_homed = true;
   slide_target = 0;
-  // homingDoneTime = millis();
   sendState(8, true);
 
   if (!lox.begin(0x29, false, &MyWire))
@@ -166,6 +163,8 @@ void setup()
     while (1)
       ;
   }
+
+  lox.startRangeContinuous(20);
 
   Serial.println("VL53L0X READY");
 
@@ -180,23 +179,28 @@ void loop()
   if (slide_active)
     limitMotor(slide_target);
 
-  // digitalWrite(solenoidHolder, HIGH);
-  // digitalWrite(solenoidGrip, HIGH);
-  // digitalWrite(solenoidExtend, HIGH);
-  // digitalWrite(solenoidHolder, HIGH);
-  // Serial.println("Relay ON");
-  // delay(500);
-
-  // Matikan relay
-  // digitalWrite(solenoidHolder, LOW);
-  // digitalWrite(solenoidGrip, LOW);
-  // digitalWrite(solenoidExtend, LOW);
-  // Serial.println("Relay OFF");
-  // delay(500);
+  static unsigned long lastDebugPrint = 0;
+  bool debugPrintNow = false;
+  if (millis() - lastDebugPrint >= 150) // print debug paling cepat tiap 150ms, bukan tiap loop
+  {
+    lastDebugPrint = millis();
+    debugPrintNow = true;
+  }
 
   VL53L0X_RangingMeasurementData_t measure;
+  static VL53L0X_RangingMeasurementData_t lastMeasure;
+  static bool lastMeasureValid = false;
 
-  lox.rangingTest(&measure, false);
+  if (lox.isRangeComplete()) // ada hasil baru dari sensor, ambil tanpa nunggu (non-blocking)
+  {
+    lox.getRangingMeasurement(&lastMeasure, false);
+    lastMeasureValid = true;
+  }
+
+  measure = lastMeasure;
+  if (!lastMeasureValid)
+    measure.RangeStatus = 4; // belum ada reading pertama, anggap invalid dulu
+
   bool limit1 = digitalRead(LIMIT1);
   bool limit2 = digitalRead(LIMIT2);
   bool limit3 = digitalRead(LIMIT3);
@@ -239,70 +243,146 @@ void loop()
   {
     int dist = measure.RangeMilliMeter;
 
-    // Filter loncatan data
-    if (last_dist != -1 &&
-        abs(dist - last_dist) > TOF_JUMP_MAX)
+    // Filter loncatan data (cuma buat smoothing last_dist, TIDAK skip sendTOF lagi)
+    static int candidate_dist = -1;
+    static int candidate_count = 0;
+
+    if (last_dist == -1)
     {
-      Serial.print("JUMP DIABAIKAN: ");
-      Serial.println(dist);
-      delay(50);
-      return;
+      last_dist = dist; // baca pertama kali, terima langsung
     }
-
-    last_dist = dist;
-
-    // Dalam range yang diinginkan
-    if (dist >= TOF_MIN_DIST &&
-        dist <= TOF_MAX_DIST)
+    else if (abs(dist - last_dist) > TOF_JUMP_MAX)
     {
-      Serial.print("OBJEK: ");
-      Serial.print(dist);
-      Serial.println(" mm");
+      if (debugPrintNow)
+      {
+        Serial.print("JUMP TERDETEKSI: ");
+        Serial.println(dist);
+      }
 
-      sendTOF(1, dist); // Kirim ke RX/TX
-      Serial.print("send tof");
+      if (candidate_dist != -1 && abs(dist - candidate_dist) < (TOF_JUMP_MAX / 2))
+      {
+        candidate_count++;
+      }
+      else
+      {
+        candidate_dist = dist;
+        candidate_count = 1;
+      }
+
+      if (candidate_count >= 2) // konsisten 2x reading baru -> bukan noise, update last_dist
+      {
+        last_dist = dist;
+        candidate_count = 0;
+      }
+      // kalau belum 2x konsisten, last_dist belum diupdate, TAPI lanjut ke bawah (TIDAK return)
     }
     else
     {
-      Serial.print("DI LUAR RANGE: ");
-      Serial.print(dist);
-      Serial.println(" mm");
+      last_dist = dist;
+      candidate_count = 0;
+    }
+
+    // Dalam range yang diinginkan -> SELALU pakai dist mentah saat ini, bukan last_dist
+    if (dist >= TOF_MIN_DIST && dist <= TOF_MAX_DIST)
+    {
+      if (debugPrintNow)
+      {
+        Serial.print("OBJEK: ");
+        Serial.print(dist);
+        Serial.println(" mm");
+      }
+
+      sendTOF(1, dist); // Kirim ke RX/TX, TIDAK ikut throttle, tetap tiap loop
+    }
+    else
+    {
+      if (debugPrintNow)
+      {
+        Serial.print("DI LUAR RANGE: ");
+        Serial.print(dist);
+        Serial.println(" mm");
+      }
 
       sendTOF(0, dist);
-      Serial.print("send tof OUT OF RANGE");
     }
   }
   else
   {
-    Serial.println("DATA TIDAK VALID");
-
+    if (debugPrintNow)
+      Serial.println("DATA TIDAK VALID");
     sendTOF(0, 0);
   }
+  // if (measure.RangeStatus == 0)
+  // {
+  //   int dist = measure.RangeMilliMeter;
 
-  bool a = digitalRead(LIMIT1);
-  bool b = digitalRead(LIMIT2);
-  bool c = digitalRead(LIMIT3);
-  bool d = digitalRead(LIMIT4);
-  bool e = digitalRead(PROXY1_LEFT); //belakang
-  bool f = digitalRead(PROXY1_RIGHT); //belakang  tengah
-  bool g = digitalRead(PROXY2_LEFT); //depan tengah
-  bool h = digitalRead(PROXY2_RIGHT);  //depan 
+  //   // Filter loncatan data
+  //   if (last_dist != -1 &&
+  //       abs(dist - last_dist) > TOF_JUMP_MAX)
+  //   {
+  //     Serial.print("JUMP DIABAIKAN: ");
+  //     Serial.println(dist);
+  //     delay(50);
+  //     return;
+  //   }
 
-  Serial.print(a);
-  Serial.print("  ");
-  Serial.print(b);
-  Serial.print("  ");
-  Serial.print(c);
-  Serial.print("  ");
-  Serial.print(d);
-  Serial.print("  ");
-  Serial.print(e);
-  Serial.print("  ");
-  Serial.print(f);
-  Serial.print("  ");
-  Serial.print(g);
-  Serial.print("  ");
-  Serial.println(h);
+  //   last_dist = dist;
+
+  //   // Dalam range yang diinginkan
+  //   if (dist >= TOF_MIN_DIST &&
+  //       dist <= TOF_MAX_DIST)
+  //   {
+  //     Serial.print("OBJEK: ");
+  //     Serial.print(dist);
+  //     Serial.println(" mm");
+
+  //     sendTOF(1, dist); // Kirim ke RX/TX
+  //     Serial.print("send tof");
+  //   }
+  //   else
+  //   {
+  //     Serial.print("DI LUAR RANGE: ");
+  //     Serial.print(dist);
+  //     Serial.println(" mm");
+
+  //     sendTOF(0, dist);
+  //     Serial.print("send tof OUT OF RANGE");
+  //   }
+  // }
+  // else
+  // {
+  //   Serial.println("DATA TIDAK VALID");
+
+  //   sendTOF(0, 0);
+  // }
+
+  if (debugPrintNow)
+  {
+    bool a = digitalRead(LIMIT1);
+    bool b = digitalRead(LIMIT2);
+    bool c = digitalRead(LIMIT3);
+    bool d = digitalRead(LIMIT4);
+    bool e = digitalRead(PROXY1_LEFT);  //belakang
+    bool f = digitalRead(PROXY1_RIGHT); //belakang  tengah
+    bool g = digitalRead(PROXY2_LEFT);  //depan tengah
+    bool h = digitalRead(PROXY2_RIGHT); //depan
+
+    Serial.print(a);
+    Serial.print("  ");
+    Serial.print(b);
+    Serial.print("  ");
+    Serial.print(c);
+    Serial.print("  ");
+    Serial.print(d);
+    Serial.print("  ");
+    Serial.print(e);
+    Serial.print("  ");
+    Serial.print(f);
+    Serial.print("  ");
+    Serial.print(g);
+    Serial.print("  ");
+    Serial.println(h);
+  }
 
   if (IrReceiver.decode())
   {
